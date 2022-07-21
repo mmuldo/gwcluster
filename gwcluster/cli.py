@@ -1,48 +1,17 @@
 import typer
-from seismometer import ClusteredSeismicData
-from gwpy.timeseries import TimeSeriesDict
+
+from .seismometer import ClusteredSeismicData
+from .config import get_config, clustering_default
+from gwpy.timeseries import TimeSeriesDict, TimeSeries
 from sklearn.cluster import KMeans
 from gwpy.plot import Plot
+from gwpy.time import to_gps
 import os
 import yaml
 from typing import Optional, Any
 
-CONFIG_FILE_PATH = f'{os.getenv("HOME")}/.gwcluster.yml'
-
 # the cli
 app = typer.Typer()
-
-# user config settings
-if os.path.exists(CONFIG_FILE_PATH):
-    with open(CONFIG_FILE_PATH, 'r') as config_file:
-        config = yaml.load(config_file, Loader=yaml.Loader)
-else:
-    config = None
-
-def default(
-    param: Optional[Any],
-    parent_key: str,
-    config_key: str
-) -> Any:
-    '''
-    defaults parameter to value in config if parameter is not set
-
-    Parameters
-    ----------
-    param : Any
-        variable that could None or could have a value
-    parent_key : str
-        key to dictionary with relevant configs (e.g. 'seismometer')
-    config_key : str
-        key under parent_key
-        
-    '''
-    if not param:
-        try:
-            param = config[parent_key][config_key]
-        except (TypeError, KeyError):
-            raise Exception(f'{parent_key}.{config_key} not found in config file at {CONFIG_FILE_PATH}')
-    return param
 
 def parse(arg: str) -> Any:
     '''
@@ -59,67 +28,85 @@ def parse(arg: str) -> Any:
 
     return arg
 
+def timeseries_fetch(
+    channel: str,
+    start: str,
+    end: str,
+    host: str,
+    port: int,
+    download_directory: str,
+    **kwargs
+) -> TimeSeries:
+    # paths where things will be saved
+    download_dir = os.path.join(download_directory, channel)
+
+    if os.path.exists(download_dir):
+        for tsfile in os.listdir(download_dir):
+            tsfile_start, tsfile_end = os.path.splitext(tsfile)[0].split('-')
+            if to_gps(start) >= to_gps(tsfile_start) and to_gps(end) <= to_gps(tsfile_end):
+                print(f'found {channel} locally')
+                return TimeSeries.read(os.path.join(download_dir, tsfile)).crop(to_gps(start), to_gps(end))
+
+    return TimeSeries.fetch(channel, start, end, host, port, verbose=True)
+
+def timeseriesdict_from_list(timeseriess: list[TimeSeries]) -> TimeSeriesDict:
+    tsd = TimeSeriesDict()
+
+    for ts in timeseriess:
+        tsd.update(TimeSeriesDict.fromkeys([ts.channel.name], ts))
+
+    return tsd
+
+
+default_clustering = clustering_default('seismometer')
 
 @app.command()
 def seismometer(
-    clustering: Optional[str] = None,
-    clustering_kwargs: Optional[str] = None,
-    ifo: Optional[str] = None,
-    start: Optional[str] = None,
-    end: Optional[str] = None,
-    host: Optional[str] = None,
-    port: Optional[int] = None,
+    clustering: str = typer.Option(default_clustering),
+    clustering_kwargs: str = typer.Option(None),
+    ifo: str = typer.Option(get_config('seismometer', 'ifo')),
+    system: str = typer.Option(get_config('seismometer', 'system')),
+    signal: str = typer.Option(get_config('seismometer', 'signal')),
+    start: str = typer.Option(get_config('seismometer', 'start')),
+    end: str = typer.Option(get_config('seismometer', 'end')),
+    host: str = typer.Option(get_config('seismometer', 'host')),
+    port: int = typer.Option(get_config('seismometer', 'port')),
+    download_directory: str = typer.Option(get_config('download_directory')),
+    output_directory: str = typer.Option(get_config('output_directory'))
 ):
     '''
     performs clustering on seismometer data
-
-    Parameters
-    ----------
-    clustering : str, defaults to value in config
-        clustering algorithm to use
-    clustering_kwargs : str, defaults to value in config
-        kwargs to pass to clustering algorithm, formatted as "key1=value1,key2=value2,..."
-    ifo : str, defaults to value in config
-        ifo of channels to grab seismometer data from
-    start : str, default to value in config
-        start time (must be gps parsable)
-    end : str, default to value in config
-        end time (must be gps parsable)
-    host : str, default to value in config
-        host to grab channel data from
-    port : int, default to value in config
-        port on host
     '''
-    # default parameters from config file
-    ifo = default(ifo, 'seismometer', 'ifo')
-    start = default(start, 'seismometer', 'start')
-    end = default(end, 'seismometer', 'end')
-    host = default(host, 'seismometer', 'host')
-    port = default(port, 'seismometer', 'port')
+    # check all necessary parameters are set
+    for param in ['clustering', 'ifo', 'system', 'signal', 'start', 'end', 'host', 'port']:
+        if not vars()[param]:
+            print(f'Error: "{param}" not specified on command line or in config file')
+            raise typer.Exit(1)
 
-    # default clustering algorithm
-    if clustering:
+    # parse clustering kwargs
+    if not clustering_kwargs:
+        parsed_clustering_kwargs = get_config('seismometer', 'clustering', default_clustering)
+        parsed_clustering_kwargs = parsed_clustering_kwargs if parsed_clustering_kwargs else {}
+    else:
+        # if it's a string, assume it was passed on the command line in
+        #   "key1=value1,key2=value2,..." format
         parsed_clustering_kwargs = {
             pair.split('=')[0]: parse(pair.split('=')[1])
             for pair in clustering_kwargs.split(',')
         }
-    else:
-        clustering_from_config = config['seismometer']['clustering']
-        clustering, parsed_clustering_kwargs = next(iter(clustering_from_config.items()))
-
 
     # directional movement of seismometer
     directions = ['X', 'Y', 'Z']
 
     # channels with raw data
     raw_channels = [
-        f'{ifo}:PEM-SEIS_BS_{dir}_OUT_DQ'
+        f'{ifo}:{system}-SEIS_{signal}_{dir}_OUT_DQ'
         for dir in directions
     ]
 
     # channels with blrms data
     blrms_channels = [
-        f'{ifo}:PEM-RMS_BS_{dir}_{band}.mean'
+        f'{ifo}:{system}-RMS_{signal}_{dir}_{band}.mean'
         for band in [
             '0p03_0p1',
             '0p1_0p3',
@@ -137,24 +124,53 @@ def seismometer(
         "port": port,
         "start": start,
         "end": end,
-        "verbose": True
+        "download_directory": download_directory
     }
 
     csd = ClusteredSeismicData(
-        raw=TimeSeriesDict.get(
-            channels=raw_channels,
-            **non_channel_params
-        ),
-        blrms=TimeSeriesDict.get(
-            channels=blrms_channels,
-            **non_channel_params
-        ),
+        raw=timeseriesdict_from_list([timeseries_fetch( channel, **non_channel_params) for channel in raw_channels]),
+        #raw=TimeSeriesDict.get(
+        #    channels=raw_channels,
+        #    **non_channel_params
+        #),
+        blrms=timeseriesdict_from_list([timeseries_fetch( channel, **non_channel_params) for channel in blrms_channels]),
+        #blrms=TimeSeriesDict.get(
+        #    channels=blrms_channels,
+        #    **non_channel_params
+        #),
         clustering=eval(f'{clustering}(**{parsed_clustering_kwargs})')
     )
 
-    for psds in csd.psds_of_centers(psd_length=600):
-        plot = Plot(*psds, xscale='log', yscale='log')
-        plot.show()
+    full_output_dir = os.path.join(output_directory, ifo, system)
+    if not os.path.exists:
+        os.makedirs(full_output_dir)
 
-if __name__ == '__main__':
-    app()
+    for i, psds in enumerate(csd.psds_of_centers(psd_length=600)):
+        plot = Plot(*psds, xscale='log', yscale='log', ylabel='Velocity')
+        plot.save(os.path.join(full_output_dir, f'center{i}-psd.png'))
+
+@app.command()
+def download(
+    channel: str,
+    start: str = typer.Option(get_config('seismometer', 'start')),
+    end: str = typer.Option(get_config('seismometer', 'end')),
+    host: str = typer.Option(get_config('seismometer', 'host')),
+    port: int = typer.Option(get_config('seismometer', 'port')),
+    download_directory: str = typer.Option(get_config('download_directory')),
+):
+    '''
+    downloads TimeSeries from specified channel and saves it to local disk
+
+    the data is stored at {download directory}/{channel}/{start}-{end}
+    '''
+    # fetch time series from remote
+    ts = TimeSeries.fetch(channel, start, end, host, port, verbose=True)
+
+    # paths where things will be saved
+    download_dir = os.path.join(download_directory, channel)
+    if not os.path.exists(download_dir):
+        os.makedirs(download_dir)
+
+    download_path = os.path.join(download_dir, f'{ts.span[0]}-{ts.span[1]}.hdf5')
+    if not os.path.exists(download_path):
+        ts.write(download_path)
