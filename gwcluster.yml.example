@@ -1,0 +1,19 @@
+# run this:
+#   cp gwcluster.yml.example ~/.gwcluster.yml
+# then edit ~/.gwcluster.yml to your liking
+# any parameters not specified here must be specified on the command line
+# see python -m gwcluster --help
+
+output: path/where/to/output/results
+cache_data: True
+seismometer:
+  ifo: C1
+  system: PEM
+  signal: BS
+  start: 2022-07-12 01:00:00
+  end: 2022-07-16 01:00:00
+  host: host.name.com
+  port: 12345
+  clustering:
+    KMeans:
+      n_clusters: 3

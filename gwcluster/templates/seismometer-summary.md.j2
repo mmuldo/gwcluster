@@ -1,0 +1,22 @@
+# Summary
+
+* channel: {{ channel }}
+* system: {{ system }}
+* signal: {{ signal }}
+* start: {{ start }}
+* end: {{ end }}
+* clustering: {{ clustering }}
+{% for k, v in clustering_kwargs.items() %}
+    * {{ k }}: {{ v }}
+{% endfor %}
+
+## Plots of Cluster Centers
+{% for i in range(n_clusters) %}
+![center {{ i }}](center{{i}}-psd.png)
+{% endfor %}
+
+## Vectors Plot
+![vectors colormesh](vectors.png)
+
+## Corners Plot
+![corners](corner.png)
